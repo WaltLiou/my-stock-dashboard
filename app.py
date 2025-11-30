@@ -1,17 +1,12 @@
 import streamlit as st
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
-import toml
+import time
 
 # --- Configuration ---
-SHEET_ID = "1WxWAa7V8j_5rVt2MeoLbyEXbql9FiiOC1t7_CpDaYAA"
-SCOPE = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+SHEET_ID = st.secrets["sheet_id"]
 
 st.set_page_config(page_title="Stock Option Tracker", layout="wide")
 
@@ -19,23 +14,9 @@ st.set_page_config(page_title="Stock Option Tracker", layout="wide")
 @st.cache_resource
 def get_gspread_client():
     try:
-        secrets = st.secrets["gcp_service_account"]
-        # Convert toml object to dict for gspread
-        creds_dict = {
-            "type": secrets["type"],
-            "project_id": secrets["project_id"],
-            "private_key_id": secrets["private_key_id"],
-            "private_key": secrets["private_key"],
-            "client_email": secrets["client_email"],
-            "client_id": secrets["client_id"],
-            "auth_uri": secrets["auth_uri"],
-            "token_uri": secrets["token_uri"],
-            "auth_provider_x509_cert_url": secrets["auth_provider_x509_cert_url"],
-            "client_x509_cert_url": secrets["client_x509_cert_url"],
-            "universe_domain": secrets.get("universe_domain", "googleapis.com")
-        }
-        
-        # gspread service_account_from_dict expects the dict to be exactly right
+        # 直接將 st.secrets 轉換為 dict 即可，無需手動對應欄位
+        # 確保 secrets.toml 結構為 [gcp_service_account] 下方直接放 json 內容
+        creds_dict = dict(st.secrets["gcp_service_account"])
         gc = gspread.service_account_from_dict(creds_dict)
         return gc
     except Exception as e:
@@ -48,8 +29,7 @@ def get_sheet():
         return None
     try:
         sh = gc.open_by_key(SHEET_ID)
-        worksheet = sh.sheet1
-        return worksheet
+        return sh.sheet1
     except Exception as e:
         st.error(f"Failed to open sheet: {e}")
         return None
@@ -69,6 +49,10 @@ def load_data(worksheet):
         if not data:
             return pd.DataFrame(columns=['Symbol', 'Type', 'Strike', 'Expiry', 'Premium', 'Quantity', 'EntryDate'])
         df = pd.DataFrame(data)
+        # 確保數據類型正確，避免格式錯誤
+        df['Strike'] = pd.to_numeric(df['Strike'], errors='coerce')
+        df['Premium'] = pd.to_numeric(df['Premium'], errors='coerce')
+        df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce')
         return df
     except Exception as e:
         st.error(f"Error loading data: {e}")
@@ -79,58 +63,59 @@ def add_position(worksheet, symbol, type_, strike, expiry, premium, quantity):
         entry_date = datetime.now().strftime("%Y-%m-%d")
         row = [symbol, type_, strike, expiry, premium, quantity, entry_date]
         worksheet.append_row(row)
-        st.success(f"Added position: {symbol} {type_} {strike}")
+        st.toast(f"✅ Added: {symbol} {type_} {strike}") # 使用 toast 取代 success，介面更乾淨
+        time.sleep(1) # 讓使用者看到提示
     except Exception as e:
         st.error(f"Error adding position: {e}")
 
-def delete_position(worksheet, index):
+def delete_position(worksheet, index_in_df):
     try:
-        # Index is 0-based from dataframe, but sheet is 1-based and has header.
-        # So row to delete is index + 2
-        worksheet.delete_rows(index + 2)
-        st.success("Position deleted.")
+        # 注意：這裡假設 Dataframe 沒有被排序過。
+        # Google Sheets 是 1-based，且有 header (佔 1 行)，所以是 index + 2
+        worksheet.delete_rows(index_in_df + 2)
+        st.toast("🗑️ Position deleted.")
+        time.sleep(1)
         st.rerun()
     except Exception as e:
         st.error(f"Error deleting position: {e}")
 
 # --- Market Data & Calculations ---
-def fetch_market_data(df):
+# 加入快取，TTL 設定為 60 秒，避免頻繁呼叫 API
+@st.cache_data(ttl=60)
+def get_current_prices(symbols):
+    if not symbols:
+        return {}
+    prices = {}
+    try:
+        # 使用批量下載，比迴圈快
+        unique_symbols = list(set(symbols))
+        # period='1d' 足夠，group_by='ticker' 方便處理
+        tickers = yf.download(unique_symbols, period="1d", group_by='ticker', progress=False)
+        
+        for symbol in unique_symbols:
+            try:
+                if len(unique_symbols) == 1:
+                    # yfinance 單一股票結構不同，直接取 Close
+                    price = tickers['Close'].iloc[-1].item()
+                else:
+                    price = tickers[symbol]['Close'].iloc[-1].item()
+                prices[symbol] = price
+            except Exception:
+                prices[symbol] = 0.0
+    except Exception as e:
+        st.warning(f"Market data fetch warning: {e}")
+    return prices
+
+def process_market_data(df):
     if df.empty:
         return df
     
     symbols = df['Symbol'].unique().tolist()
-    prices = {}
+    price_map = get_current_prices(symbols)
     
-    # Batch fetch for efficiency
-    if symbols:
-        try:
-            tickers = yf.Tickers(' '.join(symbols))
-            for symbol in symbols:
-                try:
-                    # Handle single ticker vs multiple tickers return structure
-                    if len(symbols) == 1:
-                        ticker = tickers.tickers[symbol]
-                    else:
-                        ticker = tickers.tickers[symbol]
-                    
-                    # Fast way to get current price
-                    history = ticker.history(period="1d")
-                    if not history.empty:
-                        prices[symbol] = history['Close'].iloc[-1]
-                    else:
-                        prices[symbol] = 0.0
-                except Exception:
-                    prices[symbol] = 0.0
-        except Exception as e:
-            st.error(f"Error fetching market data: {e}")
+    df['Current Price'] = df['Symbol'].map(price_map).fillna(0.0)
     
-    df['Current Price'] = df['Symbol'].map(prices)
-    
-    # Calculations
-    # Safety Net % = (Current Price - Strike) / Current Price
-    # Only relevant for Puts? Usually Safety Net is for Cash Secured Puts.
-    # Formula given: (Current Price - Strike) / Current Price
-    
+    # 邏輯運算
     def calculate_safety_net(row):
         if row['Type'] == 'Put' and row['Current Price'] > 0:
             return (row['Current Price'] - row['Strike']) / row['Current Price']
@@ -138,19 +123,9 @@ def fetch_market_data(df):
 
     df['Safety Net %'] = df.apply(calculate_safety_net, axis=1)
     
-    # Unrealized P&L
-    # (Premium - Current Option Price) * Quantity * 100
-    # Since we don't have real-time option prices easily from free yfinance, 
-    # we will use the fallback: Premium * Quantity * 100 (assuming current option price is 0 or just tracking collected premium)
-    # User prompt said: "if can't get option price, temporarily use (Premium) * Quantity * 100"
-    # Actually, if we sold the option (Quantity < 0), P&L is (Premium - CurrentPrice) * -Quantity * 100?
-    # Let's stick to the user's simplified formula: (Premium - 0) * Quantity * 100 for now as 'N/A' replacement
-    # But wait, if Quantity is negative (sold), and we use Premium * Quantity, we get negative number.
-    # Usually for selling options:
-    # Max Profit = Premium received.
-    # If we just want to show "Premium Collected" as P&L for now:
-    
-    df['Unrealized P&L'] = df['Premium'] * df['Quantity'] * 100
+    # P&L Display Logic (顯示已收權利金總額)
+    # 賣出選擇權 (Quantity < 0)，Premium 是正的現金流
+    df['Total Premium'] = df['Premium'] * df['Quantity'].abs() * 100
     
     return df
 
@@ -158,69 +133,103 @@ def fetch_market_data(df):
 st.title("📈 Stock Option Tracker")
 
 worksheet = get_sheet()
+
 if worksheet:
     init_sheet(worksheet)
     
     # Sidebar
-    st.sidebar.header("Add New Position")
-    with st.sidebar.form("add_position_form"):
+    st.sidebar.header("📝 Add New Position")
+    with st.sidebar.form("add_position_form", clear_on_submit=True): # clear_on_submit 自動清空
         symbol = st.text_input("Symbol").upper()
-        type_ = st.selectbox("Type", ["Put", "Call"])
+        col_type, col_action = st.columns(2)
+        with col_type:
+            type_ = st.selectbox("Type", ["Put", "Call"])
+        with col_action:
+            side = st.selectbox("Action", ["Sell (Short)", "Buy (Long)"])
+            
         strike = st.number_input("Strike Price", min_value=0.0, step=0.5)
         expiry = st.date_input("Expiry Date")
-        premium = st.number_input("Premium", min_value=0.0, step=0.01)
-        quantity = st.number_input("Quantity (Negative for Sell)", step=1)
+        premium = st.number_input("Premium Price", min_value=0.0, step=0.01)
+        qty_input = st.number_input("Quantity", min_value=1, step=1, value=1)
+        
+        # 自動處理正負號
+        quantity = -qty_input if "Sell" in side else qty_input
         
         submitted = st.form_submit_button("Add Position")
         if submitted:
-            if symbol and quantity != 0:
+            if symbol:
                 add_position(worksheet, symbol, type_, strike, str(expiry), premium, quantity)
                 st.rerun()
             else:
-                st.sidebar.error("Please enter Symbol and Quantity")
+                st.sidebar.error("Please enter Symbol")
 
     # Main Dashboard
     df = load_data(worksheet)
     
     if not df.empty:
-        df = fetch_market_data(df)
+        df = process_market_data(df)
         
-        # Formatting for display
-        display_df = df.copy()
-        
-        # Apply styling
+        # Styling
         def highlight_risk(row):
-            # Red if Put and Current Price < Strike
-            if row['Type'] == 'Put' and row['Current Price'] < row['Strike']:
-                return ['background-color: #FFCDD2; color: #B71C1C'] * len(row)
-            # Green if Safe (e.g. Put and Current Price > Strike + buffer? or just default safe)
-            # User said "Safety Net display green background". Let's just default to none or light green for safe?
-            # User: "Safety Net display green background" -> maybe specifically that column?
-            # Or "Safe orders display green background".
-            # Let's apply light green to rows that are NOT risky Puts.
-            return ['background-color: #C8E6C9; color: #1B5E20'] * len(row)
+            styles = [''] * len(row)
+            # 安全網邏輯：如果是 Put 且 現價 < 履約價 (ITM for Short Put)，標示紅色
+            # 如果是 Sell Put 且 現價 > 履約價，標示綠色
+            
+            if row['Type'] == 'Put' and row['Quantity'] < 0:
+                if row['Current Price'] < row['Strike']:
+                    # 危險：跌破履約價 (ITM)
+                    return ['background-color: #ffcdd2; color: #b71c1c'] * len(row)
+                else:
+                    # 安全：價格在履約價之上 (OTM)
+                    return ['background-color: #c8e6c9; color: #1b5e20'] * len(row)
+            return styles
 
+        st.subheader("📊 Portfolio Overview")
+        
+        # 使用 st.dataframe 的 column_config 進行更漂亮的格式化
         st.dataframe(
-            display_df.style.apply(highlight_risk, axis=1)
-            .format({
-                "Strike": "${:.2f}",
-                "Premium": "${:.2f}",
-                "Current Price": "${:.2f}",
-                "Safety Net %": "{:.2%}",
-                "Unrealized P&L": "${:.2f}"
-            }),
-            use_container_width=True
+            df.style.apply(highlight_risk, axis=1),
+            use_container_width=True,
+            column_config={
+                "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
+                "Premium": st.column_config.NumberColumn("Premium", format="$%.2f"),
+                "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
+                "Safety Net %": st.column_config.ProgressColumn(
+                    "Safety Net", 
+                    format="%.1f%%", 
+                    min_value=-0.5, 
+                    max_value=0.5,
+                    help="Distance from Strike Price"
+                ),
+                "Total Premium": st.column_config.NumberColumn("Total Premium", format="$%.2f"),
+                "EntryDate": st.column_config.DateColumn("Entry Date", format="YYYY-MM-DD"),
+            },
+            hide_index=True # 隱藏 Pandas Index，介面更乾淨
         )
         
+        st.divider()
+        
         # Delete Functionality
-        st.subheader("Manage Positions")
+        st.subheader("🗑️ Manage Positions")
+        
+        # 建立一個下拉選單用的標籤列表
+        options = [
+            f"{i}: {row['Symbol']} {row['Type']} ${row['Strike']} ({row['Expiry']})" 
+            for i, row in df.iterrows()
+        ]
+        
         col1, col2 = st.columns([3, 1])
         with col1:
-            delete_index = st.selectbox("Select Position to Delete", options=df.index, format_func=lambda x: f"{df.iloc[x]['Symbol']} {df.iloc[x]['Type']} ${df.iloc[x]['Strike']} (Qty: {df.iloc[x]['Quantity']})")
+            selected_option = st.selectbox("Select Position to Delete", options=options)
+            # 解析出 index
+            selected_index = int(selected_option.split(":")[0])
+            
         with col2:
-            if st.button("Delete Selected"):
-                delete_position(worksheet, delete_index)
+            st.write("") # Spacer
+            st.write("") # Spacer
+            if st.button("Delete Position", type="primary"):
+                delete_position(worksheet, selected_index)
     else:
         st.info("No positions found. Add one from the sidebar!")
 else:
-    st.error("Could not connect to Google Sheets.")
+    st.error("Could not connect to Google Sheets. Check your secrets.toml.")

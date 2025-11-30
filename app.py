@@ -194,14 +194,31 @@ st.title("📈 Stock Option Tracker")
 # -------- 新增這段 CSS 代碼來隱藏介面元素 --------
 hide_streamlit_style = """
             <style>
-            /* 隱藏右上角的漢堡選單 (☰) */
+            /* 1. 隱藏上方 Header (包含漢堡選單、Deploy 按鈕) */
+            header {visibility: hidden;}
+            
+            /* 2. 隱藏右上角漢堡選單 (雙重保險) */
             #MainMenu {visibility: hidden;}
             
-            /* 隱藏頁尾 (Made with Streamlit) */
+            /* 3. 隱藏頁尾 "Made with Streamlit" */
             footer {visibility: hidden;}
             
-            /* 隱藏上方的彩條 header (如果不需要留白) */
-            header {visibility: hidden;}
+            /* 4. 特別隱藏 "Deploy" 按鈕 (通常連結到 share.streamlit.io) */
+            .stDeployButton {display:none;}
+            
+            /* 5. 隱藏 Toolbar (開發者工具列，通常在右上或右下) */
+            [data-testid="stToolbar"] {visibility: hidden !important;}
+            
+            /* 6. 隱藏頂部的裝飾彩條 */
+            [data-testid="stDecoration"] {visibility: hidden;}
+            
+            /* 7. 隱藏狀態小工具 (如 Running 圖示) */
+            [data-testid="stStatusWidget"] {visibility: hidden;}
+            
+            /* 調整頂部留白 (因為 Header 被藏起來了，把內容往上推) */
+            .block-container {
+                padding-top: 1rem;
+            }
             </style>
             """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)

@@ -87,8 +87,7 @@ def delete_position(worksheet, index_in_df):
 @st.cache_data(ttl=60)
 def get_current_prices(symbols):
     """
-    修改為使用 yf.Ticker().fast_info['last_price']
-    這比 download 更適合抓取單一當前股價，且較不會因為 DataFrame 格式問題報錯。
+    Modified to use ticker.history(period="1d") as fast_info was returning None.
     """
     if not symbols:
         return {}
@@ -98,14 +97,13 @@ def get_current_prices(symbols):
     for symbol in unique_symbols:
         try:
             ticker = yf.Ticker(symbol)
-            # fast_info 提供更即時的價格數據，且結構簡單
-            last_price = ticker.fast_info.get('last_price', None)
-            
-            # 如果 last_price 抓不到，嘗試用 regularMarketPrice (有時因休市狀態不同)
-            if last_price is None:
-                 last_price = ticker.fast_info.get('regularMarketPrice', 0.0)
-            
-            prices[symbol] = last_price
+            # Use history as a fallback since fast_info is unreliable
+            hist = ticker.history(period="1d")
+            if not hist.empty:
+                # Use the last available close price
+                prices[symbol] = hist['Close'].iloc[-1]
+            else:
+                prices[symbol] = 0.0
         except Exception as e:
             print(f"Error fetching {symbol}: {e}")
             prices[symbol] = 0.0
@@ -195,8 +193,11 @@ if worksheet:
 
         st.subheader("📊 Portfolio Overview")
         
+        # Hide EntryDate from display
+        display_df = df.drop(columns=['EntryDate'], errors='ignore')
+
         st.dataframe(
-            df.style.apply(highlight_status, axis=1),
+            display_df.style.apply(highlight_status, axis=1),
             use_container_width=True,
             column_config={
                 "Strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
@@ -208,7 +209,6 @@ if worksheet:
                     max_value=0.5,
                     help="Positive: Price > Strike, Negative: Price < Strike"
                 ),
-                "EntryDate": st.column_config.DateColumn("Entry Date", format="YYYY-MM-DD"),
             },
             hide_index=True
         )

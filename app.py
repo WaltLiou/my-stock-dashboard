@@ -191,6 +191,21 @@ def display_safety_matrix(df):
 # --- Main App ---
 st.title("📈 Stock Option Tracker")
 
+# -------- 新增這段 CSS 代碼來隱藏介面元素 --------
+hide_streamlit_style = """
+            <style>
+            /* 隱藏右上角的漢堡選單 (☰) */
+            #MainMenu {visibility: hidden;}
+            
+            /* 隱藏頁尾 (Made with Streamlit) */
+            footer {visibility: hidden;}
+            
+            /* 隱藏上方的彩條 header (如果不需要留白) */
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 worksheet = get_sheet()
 
 if worksheet:

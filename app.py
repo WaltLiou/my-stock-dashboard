@@ -15,17 +15,15 @@ else:
 st.set_page_config(page_title="Stock Option Safety Net", layout="wide")
 
 # --- CSS Styling ---
-# 保持隱藏 Header，讓畫面像 App 一樣乾淨
 hide_streamlit_style = """
             <style>
-            header {visibility: hidden;}
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            .stDeployButton {display:none;}
-            [data-testid="stToolbar"] {visibility: hidden !important;}
-            [data-testid="stDecoration"] {visibility: hidden;}
-            [data-testid="stStatusWidget"] {visibility: hidden;}
+
             .block-container {padding-top: 1rem;}
+            
+            /* 優化 Metric 樣式 */
+            [data-testid="stMetricValue"] {
+                font-size: 1.5rem;
+            }
             </style>
             """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
@@ -170,9 +168,66 @@ def process_market_data(df):
     return df
 
 # --- UI Components ---
+
+# 1. 新增：重點警示區塊
+def display_alerts(df):
+    st.subheader("🚨 風險與到期監控")
+    
+    # 計算日期條件
+    today = pd.Timestamp.now().normalize()
+    next_week = today + pd.Timedelta(days=7)
+    
+    # 篩選數據
+    expiring_soon = df[df['Expiry'] <= next_week].copy()
+    high_risk = df[df['Safety %'] < 5].copy()
+    
+    # 佈局：左右兩欄
+    c1, c2 = st.columns(2)
+    
+    # 左欄：即將到期
+    with c1:
+        if not expiring_soon.empty:
+            st.error(f"⏳ 7 天內到期 ({len(expiring_soon)})")
+            # 簡化顯示，只顯示關鍵資訊
+            st.dataframe(
+                expiring_soon[['Expiry', 'Symbol', 'Type', 'Strike', 'Safety %']].style.format({
+                    'Safety %': '{:.1f}%',
+                    'Strike': '{:.1f}'
+                }),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Expiry": st.column_config.DateColumn("Exp", format="MM-DD"), # 縮短標題
+                    "Safety %": st.column_config.ProgressColumn("Safety", min_value=-20, max_value=50, format="%.1f%%")
+                }
+            )
+        else:
+            st.success("✅ 近 7 天無到期部位")
+
+    # 右欄：高風險
+    with c2:
+        if not high_risk.empty:
+            st.warning(f"⚠️ 高風險 Safety < 5% ({len(high_risk)})")
+            st.dataframe(
+                high_risk[['Symbol', 'Type', 'Strike', 'Current Price', 'Safety %']].style.format({
+                    'Safety %': '{:.1f}%',
+                    'Strike': '{:.1f}',
+                    'Current Price': '{:.1f}'
+                }),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Current Price": "Price",
+                    "Safety %": st.column_config.ProgressColumn("Safety", min_value=-20, max_value=50, format="%.1f%%")
+                }
+            )
+        else:
+            st.success("✅ 所有部位 Safety > 5%")
+
+# 2. 矩陣視圖
 def display_safety_matrix(df):
     if df.empty: return
-    st.subheader("🕸️ 安全網分布 (Notional Value)")
+    st.subheader("🕸️ 整體分布 (Notional Value)")
     
     col_radio, _ = st.columns([1, 4])
     with col_radio:
@@ -204,30 +259,21 @@ worksheet = get_sheet()
 if worksheet:
     init_sheet(worksheet)
     
-    # [修改點] 將原本在 sidebar 的表單移到主頁面的 Expander
-    # expanded=False 預設摺疊，保持畫面乾淨
+    # 1. 輸入區塊 (摺疊)
     with st.expander("📝 新增持倉 (Add New Position)", expanded=False):
         with st.form("add_position_form", clear_on_submit=True):
-            # 第一行：代號、類型、方向
             c1, c2, c3 = st.columns([2, 1, 1])
-            with c1:
-                symbol = st.text_input("Symbol").upper().strip()
-            with c2:
-                type_ = st.selectbox("Type", ["Put", "Call"])
-            with c3:
-                side = st.selectbox("Action", ["Sell", "Buy"]) # 簡化顯示
+            with c1: symbol = st.text_input("Symbol").upper().strip()
+            with c2: type_ = st.selectbox("Type", ["Put", "Call"])
+            with c3: side = st.selectbox("Action", ["Sell", "Buy"])
                 
-            # 第二行：價格、日期、數量
             c4, c5, c6 = st.columns([1, 1, 1])
-            with c4:
-                strike = st.number_input("Strike", min_value=0.0, step=0.5)
+            with c4: strike = st.number_input("Strike", min_value=0.0, step=0.5)
             with c5:
                 default_date = datetime.now() + timedelta(days=30)
                 expiry = st.date_input("Expiry", value=default_date)
-            with c6:
-                qty_input = st.number_input("Qty (Abs)", min_value=1, step=1, value=1)
+            with c6: qty_input = st.number_input("Qty (Abs)", min_value=1, step=1, value=1)
             
-            # Submit 按鈕
             if st.form_submit_button("Add Position", type="primary"):
                 if symbol:
                     quantity = -qty_input if "Sell" in side else qty_input
@@ -236,19 +282,26 @@ if worksheet:
                 else:
                     st.warning("Please enter Symbol")
 
-    # Load & Process
+    # 2. 資料處理
     df = load_data(worksheet)
     
     if not df.empty:
         with st.spinner('Updating market data...'):
             df = process_market_data(df)
         
+        # [重點變更] 3. 優先顯示警示儀表板
+        display_alerts(df)
+        
+        st.divider()
+
+        # 4. 顯示矩陣 (大局觀)
         display_safety_matrix(df)
         
         st.divider()
-        st.subheader("📋 詳細持倉與管理")
+
+        # 5. 詳細列表 (管理與刪除)
+        st.subheader("📋 所有持倉管理 (Full List)")
         
-        # Data Editor Setup
         df_editor = df.copy()
         df_editor.insert(0, "Delete", False)
         
@@ -282,7 +335,6 @@ if worksheet:
         
         if not rows_to_delete.empty:
             count = len(rows_to_delete)
-            # 在按鈕上顯示提示
             if st.button(f"🗑️ 確認刪除 ({count})", type="primary"):
                 indices_to_del = rows_to_delete['_row_index'].tolist()
                 delete_positions_batch(worksheet, indices_to_del)

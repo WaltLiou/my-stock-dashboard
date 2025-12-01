@@ -2,7 +2,7 @@ import streamlit as st
 import gspread
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 
 # --- Configuration ---
@@ -13,6 +13,22 @@ else:
     st.stop()
 
 st.set_page_config(page_title="Stock Option Safety Net", layout="wide")
+
+# --- CSS Styling ---
+# 保持隱藏 Header，讓畫面像 App 一樣乾淨
+hide_streamlit_style = """
+            <style>
+            header {visibility: hidden;}
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            .stDeployButton {display:none;}
+            [data-testid="stToolbar"] {visibility: hidden !important;}
+            [data-testid="stDecoration"] {visibility: hidden;}
+            [data-testid="stStatusWidget"] {visibility: hidden;}
+            .block-container {padding-top: 1rem;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # --- Google Sheets Connection ---
 @st.cache_resource
@@ -48,15 +64,15 @@ def load_data(worksheet):
     try:
         data = worksheet.get_all_records()
         if not data:
-            return pd.DataFrame(columns=['Symbol', 'Type', 'Strike', 'Expiry', 'Quantity', 'EntryDate'])
-        df = pd.DataFrame(data)
+            return pd.DataFrame(columns=['Symbol', 'Type', 'Strike', 'Expiry', 'Quantity', 'EntryDate', '_row_index'])
         
-        # 1. 強制轉換數值
+        df = pd.DataFrame(data)
+        df['_row_index'] = df.index + 2 
+        
         df['Strike'] = pd.to_numeric(df['Strike'], errors='coerce')
         df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce')
-        
-        # 2. 強制轉換日期並排序 (解決問題3)
         df['Expiry'] = pd.to_datetime(df['Expiry'])
+        
         df = df.sort_values(by='Expiry')
         
         return df
@@ -70,40 +86,50 @@ def add_position(worksheet, symbol, type_, strike, expiry, quantity):
         row = [symbol, type_, strike, expiry, quantity, entry_date]
         worksheet.append_row(row)
         st.toast(f"✅ Added: {symbol} {type_} {strike}")
-        time.sleep(1)
     except Exception as e:
         st.error(f"Error adding position: {e}")
 
-def delete_position(worksheet, index_in_df):
+def delete_positions_batch(worksheet, row_indices):
     try:
-        # sheet row index start from 1, header is 1, so data starts at 2.
-        # But index_in_df is from dataframe which might be filtered or sorted.
-        # This simple deletion relies on the original order. 
-        # For safety in production, finding by ID is better, but here we assume direct mapping
-        worksheet.delete_rows(index_in_df + 2)
-        st.toast("🗑️ Position deleted.")
-        time.sleep(1)
+        sorted_indices = sorted(row_indices, reverse=True)
+        for idx in sorted_indices:
+            worksheet.delete_rows(idx)
+        st.toast(f"🗑️ Deleted {len(sorted_indices)} position(s).")
+        time.sleep(0.5) 
         st.rerun()
     except Exception as e:
-        st.error(f"Error deleting position: {e}")
+        st.error(f"Error deleting positions: {e}")
 
 # --- Market Data & Calculations ---
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300) 
 def get_current_prices(symbols):
     if not symbols: return {}
-    prices = {}
     unique_symbols = list(set(symbols))
+    prices = {}
     
-    for symbol in unique_symbols:
-        try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                prices[symbol] = hist['Close'].iloc[-1]
+    try:
+        tickers_str = " ".join(unique_symbols)
+        data = yf.download(tickers_str, period="1d", group_by='ticker', progress=False)
+        
+        if len(unique_symbols) == 1:
+            sym = unique_symbols[0]
+            if not data.empty:
+                prices[sym] = data['Close'].iloc[-1]
             else:
-                prices[symbol] = 0.0
-        except:
-            prices[symbol] = 0.0
+                prices[sym] = 0.0
+        else:
+            for sym in unique_symbols:
+                try:
+                    if sym in data.columns.levels[0]:
+                        val = data[sym]['Close'].iloc[-1]
+                        prices[sym] = val
+                    else:
+                        prices[sym] = 0.0
+                except:
+                    prices[sym] = 0.0
+    except:
+        return {s: 0.0 for s in unique_symbols}
+                
     return prices
 
 def process_market_data(df):
@@ -113,11 +139,8 @@ def process_market_data(df):
     price_map = get_current_prices(symbols)
     
     df['Current Price'] = df['Symbol'].map(price_map).fillna(0.0)
-    
-    # 計算 Notional Value (名目本金) = Strike * Qty * 100
     df['Notional'] = df['Strike'] * df['Quantity'].abs() * 100
     
-    # 解決問題 1 & 2: 正確計算 Put/Call 的安全距離
     def calculate_safety_gap(row):
         current = row['Current Price']
         strike = row['Strike']
@@ -129,17 +152,16 @@ def process_market_data(df):
         else:
             val = (strike - current) / current
             
-        return val * 100  # <--- 關鍵修改：這裡乘了 100
+        return val * 100 
 
     df['Safety %'] = df.apply(calculate_safety_gap, axis=1)
     
-    # 為分布圖建立 Bucket 標籤
     def get_bucket(val):
         if val < 0: return '<0%'
-        elif val < 5: return '0-5%'    # 原本是 0.05
-        elif val < 10: return '5-10%'  # 原本是 0.10
-        elif val < 15: return '10-15%' # 原本是 0.15
-        elif val < 20: return '15-20%' # 原本是 0.20
+        elif val < 5: return '0-5%'
+        elif val < 10: return '5-10%'
+        elif val < 15: return '10-15%'
+        elif val < 20: return '15-20%'
         else: return '>20%'
         
     df['Bucket'] = df['Safety %'].apply(get_bucket)
@@ -149,23 +171,18 @@ def process_market_data(df):
 
 # --- UI Components ---
 def display_safety_matrix(df):
-    """建立類似截圖的分布矩陣"""
     if df.empty: return
-
     st.subheader("🕸️ 安全網分布 (Notional Value)")
-
-    # 解決問題 4: 切換 Put / Call
-    view_type = st.radio("顯示類型", ["Put", "Call"], horizontal=True)
     
-    # 篩選數據
+    col_radio, _ = st.columns([1, 4])
+    with col_radio:
+        view_type = st.radio("顯示類型", ["Put", "Call"], horizontal=True, label_visibility="collapsed")
+    
     filtered_df = df[df['Type'] == view_type].copy()
-    
     if filtered_df.empty:
         st.info(f"目前沒有 {view_type} 部位")
         return
 
-    # 建立 Pivot Table
-    # Index: 到期月份, Columns: 安全區間, Values: Notional 加總
     pivot = filtered_df.pivot_table(
         index='ExpiryMonth', 
         columns='Bucket', 
@@ -173,148 +190,104 @@ def display_safety_matrix(df):
         aggfunc='sum',
         fill_value=0
     )
-    
-    # 確保 Columns 順序正確 (解決問題 3 & 排版)
     col_order = ['<0%', '0-5%', '5-10%', '10-15%', '15-20%', '>20%']
-    # 只保留資料中存在的欄位，並補齊缺失的欄位為 0
     pivot = pivot.reindex(columns=col_order, fill_value=0)
-    
-    # 增加「總計」欄位
     pivot['總計'] = pivot.sum(axis=1)
 
-    # 格式化顯示：千分位
-    st.dataframe(
-        pivot.style.format("{:,.0f}"), 
-        use_container_width=True
-    )
+    st.dataframe(pivot.style.format("{:,.0f}"), use_container_width=True)
 
 # --- Main App ---
 st.title("📈 Stock Option Tracker")
-
-# -------- 新增這段 CSS 代碼來隱藏介面元素 --------
-hide_streamlit_style = """
-            <style>
-            /* 1. 隱藏上方 Header (包含漢堡選單、Deploy 按鈕) */
-            header {visibility: hidden;}
-            
-            /* 2. 隱藏右上角漢堡選單 (雙重保險) */
-            #MainMenu {visibility: hidden;}
-            
-            /* 3. 隱藏頁尾 "Made with Streamlit" */
-            footer {visibility: hidden;}
-            
-            /* 4. 特別隱藏 "Deploy" 按鈕 (通常連結到 share.streamlit.io) */
-            .stDeployButton {display:none;}
-            
-            /* 5. 隱藏 Toolbar (開發者工具列，通常在右上或右下) */
-            [data-testid="stToolbar"] {visibility: hidden !important;}
-            
-            /* 6. 隱藏頂部的裝飾彩條 */
-            [data-testid="stDecoration"] {visibility: hidden;}
-            
-            /* 7. 隱藏狀態小工具 (如 Running 圖示) */
-            [data-testid="stStatusWidget"] {visibility: hidden;}
-            
-            /* 調整頂部留白 (因為 Header 被藏起來了，把內容往上推) */
-            .block-container {
-                padding-top: 1rem;
-            }
-            </style>
-            """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 worksheet = get_sheet()
 
 if worksheet:
     init_sheet(worksheet)
     
-    # Sidebar: Add Position
-    with st.sidebar:
-        st.header("📝 Add New Position")
+    # [修改點] 將原本在 sidebar 的表單移到主頁面的 Expander
+    # expanded=False 預設摺疊，保持畫面乾淨
+    with st.expander("📝 新增持倉 (Add New Position)", expanded=False):
         with st.form("add_position_form", clear_on_submit=True):
-            symbol = st.text_input("Symbol").upper()
-            col_type, col_action = st.columns(2)
-            with col_type:
+            # 第一行：代號、類型、方向
+            c1, c2, c3 = st.columns([2, 1, 1])
+            with c1:
+                symbol = st.text_input("Symbol").upper().strip()
+            with c2:
                 type_ = st.selectbox("Type", ["Put", "Call"])
-            with col_action:
-                side = st.selectbox("Action", ["Sell (Short)", "Buy (Long)"])
+            with c3:
+                side = st.selectbox("Action", ["Sell", "Buy"]) # 簡化顯示
                 
-            strike = st.number_input("Strike Price", min_value=0.0, step=0.5)
-            expiry = st.date_input("Expiry Date")
-            qty_input = st.number_input("Quantity", min_value=1, step=1, value=1)
-            quantity = -qty_input if "Sell" in side else qty_input
+            # 第二行：價格、日期、數量
+            c4, c5, c6 = st.columns([1, 1, 1])
+            with c4:
+                strike = st.number_input("Strike", min_value=0.0, step=0.5)
+            with c5:
+                default_date = datetime.now() + timedelta(days=30)
+                expiry = st.date_input("Expiry", value=default_date)
+            with c6:
+                qty_input = st.number_input("Qty (Abs)", min_value=1, step=1, value=1)
             
-            if st.form_submit_button("Add Position"):
+            # Submit 按鈕
+            if st.form_submit_button("Add Position", type="primary"):
                 if symbol:
+                    quantity = -qty_input if "Sell" in side else qty_input
                     add_position(worksheet, symbol, type_, strike, str(expiry), quantity)
                     st.rerun()
                 else:
-                    st.error("Please enter Symbol")
+                    st.warning("Please enter Symbol")
 
-    # Load & Process Data
+    # Load & Process
     df = load_data(worksheet)
     
     if not df.empty:
-        df = process_market_data(df)
+        with st.spinner('Updating market data...'):
+            df = process_market_data(df)
         
-        # 1. 顯示安全網分布矩陣 (你最需要的功能)
         display_safety_matrix(df)
         
         st.divider()
-
-        # 2. 詳細持倉列表
-        st.subheader("📋 詳細持倉 (Portfolio)")
+        st.subheader("📋 詳細持倉與管理")
         
-        # 格式化一下顯示的 DataFrame
-        display_df = df[['Expiry', 'Symbol', 'Type', 'Strike', 'Current Price', 'Safety %', 'Quantity', 'Notional']].copy()
+        # Data Editor Setup
+        df_editor = df.copy()
+        df_editor.insert(0, "Delete", False)
         
-        # 設定顏色樣式
-        def highlight_row(row):
-            if row['Safety %'] < 0:
-                return ['background-color: #ffebee; color: #c62828'] * len(row)
-            elif row['Safety %'] < 5:  # <--- 這裡改成 5 (代表 5%)
-                return ['background-color: #fffde7; color: #f57f17'] * len(row)
-            return [''] * len(row)
+        cols_to_show = ['Delete', 'Expiry', 'Symbol', 'Type', 'Strike', 'Current Price', 'Safety %', 'Quantity', 'Notional', '_row_index']
+        df_editor = df_editor[cols_to_show]
 
-        st.dataframe(
-            display_df.style.apply(highlight_row, axis=1),
-            use_container_width=True,
+        edited_df = st.data_editor(
+            df_editor,
             column_config={
-                "Expiry": st.column_config.DateColumn("Expiry", format="YYYY-MM-DD"),
+                "Delete": st.column_config.CheckboxColumn("Del", width="small", default=False),
+                "_row_index": None,
+                "Expiry": st.column_config.DateColumn("Expiry", format="YYYY-MM-DD", width="medium"),
                 "Strike": st.column_config.NumberColumn("Strike", format="$%.1f"),
                 "Current Price": st.column_config.NumberColumn("Price", format="$%.1f"),
                 "Notional": st.column_config.NumberColumn("Notional", format="$%,.0f"),
-                # 修正 3: 進度條設定調整
                 "Safety %": st.column_config.ProgressColumn(
                     "Safety Net", 
-                    format="%.1f%%",   # 這樣 10.5 就會顯示 10.5%
-                    min_value=-20,     # 設定為 -20%
-                    max_value=50,      # 設定為 50%
-                    help="正數 = 價外(安全)距離 %; 負數 = 價內(已跌破/漲破)"
+                    format="%.1f%%", 
+                    min_value=-20, 
+                    max_value=50,
+                    width="medium"
                 ),
             },
-            hide_index=True
+            disabled=['Expiry', 'Symbol', 'Type', 'Strike', 'Current Price', 'Safety %', 'Quantity', 'Notional', '_row_index'],
+            hide_index=True,
+            use_container_width=True,
+            key="position_editor"
         )
-
-        # Delete Section
-        st.subheader("🗑️ Delete Position")
-        # 生成刪除選項時，加上索引以便查找
-        delete_options = [
-            f"{idx}: {row['Expiry'].strftime('%Y-%m')} | {row['Symbol']} {row['Type']} ${row['Strike']}" 
-            for idx, row in df.iterrows()
-        ]
         
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            selected_option = st.selectbox("Select to delete", options=delete_options)
-        with col2:
-            st.write("")
-            st.write("")
-            if st.button("Delete", type="primary"):
-                if selected_option:
-                    idx_to_del = int(selected_option.split(":")[0])
-                    delete_position(worksheet, idx_to_del)
+        rows_to_delete = edited_df[edited_df["Delete"] == True]
+        
+        if not rows_to_delete.empty:
+            count = len(rows_to_delete)
+            # 在按鈕上顯示提示
+            if st.button(f"🗑️ 確認刪除 ({count})", type="primary"):
+                indices_to_del = rows_to_delete['_row_index'].tolist()
+                delete_positions_batch(worksheet, indices_to_del)
+
     else:
-        st.info("目前沒有持倉數據，請從左側新增。")
+        st.info("目前沒有持倉數據，請點擊上方「新增持倉」展開表單。")
 else:
-    st.error("無法連接 Google Sheets，請檢查設定。")
+    st.error("無法連接 Google Sheets，請檢查 secrets.toml。")

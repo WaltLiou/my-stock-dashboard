@@ -17,13 +17,7 @@ st.set_page_config(page_title="Stock Option Safety Net", layout="wide")
 # --- CSS Styling ---
 hide_streamlit_style = """
             <style>
-            header {visibility: hidden;}
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            .stDeployButton {display:none;}
-            [data-testid="stToolbar"] {visibility: hidden !important;}
-            [data-testid="stDecoration"] {visibility: hidden;}
-            [data-testid="stStatusWidget"] {visibility: hidden;}
+
             .block-container {padding-top: 1rem;}
             
             [data-testid="stMetricValue"] {
@@ -265,7 +259,7 @@ def display_safety_matrix(df):
     st.dataframe(pivot.style.format("{:,.0f}"), use_container_width=True)
 
 # --- Main App ---
-st.title("📈 Stock Option Tracker")
+st.title("📈 Option Tracker")
 
 worksheet = get_sheet()
 
@@ -356,4 +350,5 @@ if worksheet:
         st.info("目前沒有持倉數據，請點擊上方「新增持倉」展開表單。")
 else:
     st.error("無法連接 Google Sheets，請檢查 secrets.toml。")
+
 

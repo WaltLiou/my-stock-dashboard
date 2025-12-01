@@ -115,7 +115,7 @@ def delete_positions_batch(worksheet, row_indices):
         st.error(f"Error deleting positions: {e}")
 
 # --- Market Data & Calculations ---
-@st.cache_data(ttl=300) 
+@st.cache_data(ttl=60) 
 def get_current_prices(symbols):
     if not symbols: return {}
     unique_symbols = list(set(symbols))
@@ -356,3 +356,4 @@ if worksheet:
         st.info("目前沒有持倉數據，請點擊上方「新增持倉」展開表單。")
 else:
     st.error("無法連接 Google Sheets，請檢查 secrets.toml。")
+

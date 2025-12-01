@@ -17,10 +17,15 @@ st.set_page_config(page_title="Stock Option Safety Net", layout="wide")
 # --- CSS Styling ---
 hide_streamlit_style = """
             <style>
-
+            header {visibility: hidden;}
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            .stDeployButton {display:none;}
+            [data-testid="stToolbar"] {visibility: hidden !important;}
+            [data-testid="stDecoration"] {visibility: hidden;}
+            [data-testid="stStatusWidget"] {visibility: hidden;}
             .block-container {padding-top: 1rem;}
             
-            /* 優化 Metric 樣式 */
             [data-testid="stMetricValue"] {
                 font-size: 1.5rem;
             }
@@ -65,11 +70,22 @@ def load_data(worksheet):
             return pd.DataFrame(columns=['Symbol', 'Type', 'Strike', 'Expiry', 'Quantity', 'EntryDate', '_row_index'])
         
         df = pd.DataFrame(data)
+        
+        # 1. 記錄原始行號 (在過濾之前！)
         df['_row_index'] = df.index + 2 
         
+        # 2. 轉換格式 (包含您之前的日期修復 mixed format)
         df['Strike'] = pd.to_numeric(df['Strike'], errors='coerce')
         df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce')
-        df['Expiry'] = pd.to_datetime(df['Expiry'])
+        df['Expiry'] = pd.to_datetime(df['Expiry'], format='mixed', errors='coerce')
+        
+        # 移除無效日期以避免錯誤
+        df = df.dropna(subset=['Expiry'])
+        
+        # [修改點 1] 過濾掉過期很久的部位
+        # 邏輯：只保留 (到期日 >= 昨天) 的部位
+        yesterday = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+        df = df[df['Expiry'] >= yesterday]
         
         df = df.sort_values(by='Expiry')
         
@@ -169,35 +185,32 @@ def process_market_data(df):
 
 # --- UI Components ---
 
-# 1. 新增：重點警示區塊
 def display_alerts(df):
     st.subheader("🚨 風險與到期監控")
     
-    # 計算日期條件
     today = pd.Timestamp.now().normalize()
     next_week = today + pd.Timedelta(days=7)
     
-    # 篩選數據
     expiring_soon = df[df['Expiry'] <= next_week].copy()
     high_risk = df[df['Safety %'] < 5].copy()
     
-    # 佈局：左右兩欄
     c1, c2 = st.columns(2)
     
-    # 左欄：即將到期
+    # [修改點 2] 左欄：即將到期 -> 加入 Current Price
     with c1:
         if not expiring_soon.empty:
             st.error(f"⏳ 7 天內到期 ({len(expiring_soon)})")
-            # 簡化顯示，只顯示關鍵資訊
             st.dataframe(
-                expiring_soon[['Expiry', 'Symbol', 'Type', 'Strike', 'Safety %']].style.format({
+                expiring_soon[['Expiry', 'Symbol', 'Type', 'Strike', 'Current Price', 'Safety %']].style.format({
                     'Safety %': '{:.1f}%',
-                    'Strike': '{:.1f}'
+                    'Strike': '{:.1f}',
+                    'Current Price': '{:.1f}' # 格式化價格
                 }),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Expiry": st.column_config.DateColumn("Exp", format="MM-DD"), # 縮短標題
+                    "Expiry": st.column_config.DateColumn("Exp", format="MM-DD", width="small"),
+                    "Current Price": st.column_config.NumberColumn("Price", format="%.1f"), # 加入欄位設定
                     "Safety %": st.column_config.ProgressColumn("Safety", min_value=-20, max_value=50, format="%.1f%%")
                 }
             )
@@ -209,7 +222,7 @@ def display_alerts(df):
         if not high_risk.empty:
             st.warning(f"⚠️ 高風險 Safety < 5% ({len(high_risk)})")
             st.dataframe(
-                high_risk[['Symbol', 'Type', 'Strike', 'Current Price', 'Safety %']].style.format({
+                high_risk[['Expiry', 'Symbol', 'Type', 'Strike', 'Current Price', 'Safety %']].style.format({
                     'Safety %': '{:.1f}%',
                     'Strike': '{:.1f}',
                     'Current Price': '{:.1f}'
@@ -217,14 +230,14 @@ def display_alerts(df):
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Current Price": "Price",
+                    "Expiry": st.column_config.DateColumn("Exp", format="MM-DD", width="small"),
+                    "Current Price": st.column_config.NumberColumn("Price", format="%.1f"),
                     "Safety %": st.column_config.ProgressColumn("Safety", min_value=-20, max_value=50, format="%.1f%%")
                 }
             )
         else:
             st.success("✅ 所有部位 Safety > 5%")
 
-# 2. 矩陣視圖
 def display_safety_matrix(df):
     if df.empty: return
     st.subheader("🕸️ 整體分布 (Notional Value)")
@@ -259,7 +272,7 @@ worksheet = get_sheet()
 if worksheet:
     init_sheet(worksheet)
     
-    # 1. 輸入區塊 (摺疊)
+    # 1. 輸入區塊
     with st.expander("📝 新增持倉 (Add New Position)", expanded=False):
         with st.form("add_position_form", clear_on_submit=True):
             c1, c2, c3 = st.columns([2, 1, 1])
@@ -289,23 +302,23 @@ if worksheet:
         with st.spinner('Updating market data...'):
             df = process_market_data(df)
         
-        # [重點變更] 3. 優先顯示警示儀表板
+        # 3. 儀表板
         display_alerts(df)
         
         st.divider()
 
-        # 4. 顯示矩陣 (大局觀)
+        # 4. 矩陣
         display_safety_matrix(df)
         
         st.divider()
 
-        # 5. 詳細列表 (管理與刪除)
+        # 5. 詳細列表
         st.subheader("📋 所有持倉管理 (Full List)")
         
         df_editor = df.copy()
-        df_editor.insert(0, "Delete", False)
+        df_editor['Delete'] = False 
         
-        cols_to_show = ['Delete', 'Expiry', 'Symbol', 'Type', 'Strike', 'Current Price', 'Safety %', 'Quantity', 'Notional', '_row_index']
+        cols_to_show = ['Expiry', 'Symbol', 'Type', 'Strike', 'Current Price', 'Safety %', 'Quantity', 'Notional', 'Delete', '_row_index']
         df_editor = df_editor[cols_to_show]
 
         edited_df = st.data_editor(

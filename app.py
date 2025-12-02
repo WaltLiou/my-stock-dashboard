@@ -398,7 +398,7 @@ def display_full_list(worksheet, df):
             delete_positions_batch(worksheet, indices_to_del)
 
 # --- Main App ---
-st.title("📈 Stock Option Safety Net")
+st.title("📈 Option Safety")
 
 worksheet = get_sheet()
 
@@ -428,3 +428,4 @@ if worksheet:
         st.info("目前沒有持倉數據，請使用上方表單新增。")
 else:
     st.error("無法連接 Google Sheets，請檢查 secrets.toml。")
+

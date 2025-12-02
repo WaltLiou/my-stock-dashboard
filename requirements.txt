@@ -4,3 +4,4 @@ yfinance
 pandas
 oauth2client
 toml
+matplotlib
